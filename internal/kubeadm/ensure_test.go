@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
+	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
+
 	v1alpha1 "github.com/MatchaScript/nanok8s/internal/apis/bootstrap/v1alpha1"
 )
 
@@ -59,6 +62,24 @@ func TestBuildInitConfigurationPopulatesCoreFields(t *testing.T) {
 	}
 	if kc.Etcd.Local == nil || len(kc.Etcd.Local.ServerCertSANs) != 2 {
 		t.Errorf("Etcd.Local.ServerCertSANs=%v", kc.Etcd.Local)
+	}
+	if len(kc.APIServer.CertSANs) != 2 {
+		t.Errorf("APIServer.CertSANs=%v, want 2 entries", kc.APIServer.CertSANs)
+	}
+
+	kubeletCfg := kc.ComponentConfigs[componentconfigs.KubeletGroup].Get().(*kubeletconfigv1beta1.KubeletConfiguration)
+	if kubeletCfg.CgroupDriver != "systemd" {
+		t.Errorf("KubeletConfiguration.CgroupDriver=%q, want systemd", kubeletCfg.CgroupDriver)
+	}
+	if len(kubeletCfg.ClusterDNS) != 1 || kubeletCfg.ClusterDNS[0] != "10.96.0.10" {
+		t.Errorf("KubeletConfiguration.ClusterDNS=%v, want [10.96.0.10]", kubeletCfg.ClusterDNS)
+	}
+
+	if kc.CACertificateValidityPeriod == nil || kc.CACertificateValidityPeriod.Duration.Hours() != 3650*24 {
+		t.Errorf("CACertificateValidityPeriod=%v, want 3650d", kc.CACertificateValidityPeriod)
+	}
+	if kc.CertificateValidityPeriod == nil || kc.CertificateValidityPeriod.Duration.Hours() != 3650*24 {
+		t.Errorf("CertificateValidityPeriod=%v, want 3650d", kc.CertificateValidityPeriod)
 	}
 }
 

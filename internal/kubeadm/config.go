@@ -7,8 +7,12 @@ package kubeadm
 
 import (
 	"fmt"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	v1alpha1 "github.com/MatchaScript/nanok8s/internal/apis/bootstrap/v1alpha1"
@@ -67,6 +71,21 @@ func BuildInitConfiguration(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName
 	}
 
 	kc.APIServer.CertSANs = extraSANs(cfg)
+
+	day := 24 * time.Hour
+	kc.CACertificateValidityPeriod = &metav1.Duration{Duration: time.Duration(cfg.Spec.Certificates.CAValidityDays) * day}
+	kc.CertificateValidityPeriod = &metav1.Duration{Duration: time.Duration(cfg.Spec.Certificates.LeafValidityDays) * day}
+
+	// ClusterDNS and CgroupDriver live on the embedded KubeletConfiguration,
+	// not NodeRegistration. DefaultedStaticInitConfiguration already populated
+	// the component config with values derived from the *default* ServiceSubnet,
+	// so we overwrite them with the user's choices after Networking is set.
+	if kcc, ok := kc.ComponentConfigs[componentconfigs.KubeletGroup]; ok {
+		kubeletCfg := kcc.Get().(*kubeletconfigv1beta1.KubeletConfiguration)
+		kubeletCfg.ClusterDNS = []string{cfg.Spec.ControlPlane.ClusterDNS}
+		kubeletCfg.ClusterDomain = kc.Networking.DNSDomain
+		kubeletCfg.CgroupDriver = string(cfg.Spec.Runtime.CgroupDriver)
+	}
 
 	return kc, nil
 }

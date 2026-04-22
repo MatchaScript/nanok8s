@@ -1,0 +1,11 @@
+[Unit]
+Description=nanok8s reconciler (bootstrap phases + addons)
+Documentation=https://github.com/MatchaScript/nanok8s
+After=kubelet.service
+Wants=kubelet.service
+ConditionPathExists=/etc/nanok8s/config.yaml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nanok8s apply
+Restart=no
