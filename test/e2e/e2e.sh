@@ -63,6 +63,29 @@ setup_dependencies() {
   curl -fsSL https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl
   chmod +x /usr/local/bin/kubelet /usr/local/bin/kubectl
 
+  # Setup kubelet systemd service (aligned with kubeadm requirements)
+  cat <<EOF > /etc/systemd/system/kubelet.service
+[Unit]
+Description=kubelet: The Kubernetes Node Agent
+Documentation=https://kubernetes.io/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+EnvironmentFile=-/etc/default/kubelet
+ExecStart=/usr/local/bin/kubelet \$KUBELET_KUBECONFIG_ARGS \$KUBELET_CONFIG_ARGS \$KUBELET_KUBEADM_ARGS \$KUBELET_EXTRA_ARGS
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+
   # Setup nanok8s service and config
   cp packaging/systemd/nanok8s.service /etc/systemd/system/
   mkdir -p /etc/nanok8s
