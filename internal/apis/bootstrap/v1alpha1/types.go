@@ -1,7 +1,10 @@
 // Package v1alpha1 defines the NanoK8sConfig API consumed by `nanok8s bootstrap`
-// and `nanok8s apply`. The shape intentionally mirrors kubeadm InitConfiguration
-// fields where equivalents exist, so mapping is straightforward.
+// and the oneshot `nanok8s.service` boot flow. The shape intentionally mirrors
+// kubeadm InitConfiguration fields where equivalents exist, so mapping is
+// straightforward.
 package v1alpha1
+
+import corev1 "k8s.io/api/core/v1"
 
 const (
 	GroupName  = "bootstrap.nanok8s.io"
@@ -26,10 +29,20 @@ type NanoK8sConfig struct {
 }
 
 type NanoK8sConfigSpec struct {
-	KubernetesVersion string               `json:"kubernetesVersion,omitempty"`
-	ControlPlane      ControlPlaneSpec     `json:"controlPlane"`
-	Runtime           RuntimeSpec          `json:"runtime,omitempty"`
-	Certificates      CertificatesSpec     `json:"certificates,omitempty"`
+	ControlPlane     ControlPlaneSpec     `json:"controlPlane"`
+	Runtime          RuntimeSpec          `json:"runtime,omitempty"`
+	Certificates     CertificatesSpec     `json:"certificates,omitempty"`
+	NodeRegistration NodeRegistrationSpec `json:"nodeRegistration,omitempty"`
+}
+
+// NodeRegistrationSpec mirrors kubeadm's InitConfiguration.NodeRegistration
+// fields that nanok8s currently exposes.
+type NodeRegistrationSpec struct {
+	// Taints applied to the node after apiserver becomes reachable.
+	// nil  → use the default ([node-role.kubernetes.io/control-plane:NoSchedule]).
+	// []   → no taints (workloads scheduled onto the control-plane node).
+	// else → exactly the listed taints.
+	Taints []corev1.Taint `json:"taints,omitempty"`
 }
 
 type ControlPlaneMode string

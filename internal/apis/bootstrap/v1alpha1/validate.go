@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/MatchaScript/nanok8s/internal/version"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Validate returns an aggregated error describing every problem found in c,
@@ -20,13 +20,6 @@ func Validate(c *NanoK8sConfig) error {
 	}
 	if c.Kind != Kind {
 		errs = append(errs, fmt.Errorf("kind must be %q, got %q", Kind, c.Kind))
-	}
-
-	if c.Spec.KubernetesVersion != version.KubernetesVersion {
-		errs = append(errs, fmt.Errorf(
-			"spec.kubernetesVersion %q does not match this nanok8s binary (built for %q); "+
-				"nanok8s minor versions are pinned 1:1 to kubelet",
-			c.Spec.KubernetesVersion, version.KubernetesVersion))
 	}
 
 	cp := c.Spec.ControlPlane
@@ -70,6 +63,18 @@ func Validate(c *NanoK8sConfig) error {
 	}
 	if certs.LeafValidityDays <= 0 {
 		errs = append(errs, errors.New("spec.certificates.leafValidityDays must be > 0"))
+	}
+
+	for i, t := range c.Spec.NodeRegistration.Taints {
+		if t.Key == "" {
+			errs = append(errs, fmt.Errorf("spec.nodeRegistration.taints[%d].key is required", i))
+		}
+		switch t.Effect {
+		case corev1.TaintEffectNoSchedule, corev1.TaintEffectPreferNoSchedule, corev1.TaintEffectNoExecute:
+		default:
+			errs = append(errs, fmt.Errorf("spec.nodeRegistration.taints[%d].effect must be one of NoSchedule/PreferNoSchedule/NoExecute, got %q",
+				i, t.Effect))
+		}
 	}
 
 	return errors.Join(errs...)

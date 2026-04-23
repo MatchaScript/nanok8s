@@ -26,9 +26,8 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		newBootstrapCmd(opts),
-		newApplyCmd(opts),
-		newAddonsCmd(opts),
-		newStatusCmd(opts),
+		newResetCmd(opts),
+		newBootCmd(opts), // hidden, invoked by nanok8s.service
 		newConfigCmd(opts),
 		newVersionCmd(),
 	)
@@ -39,6 +38,7 @@ func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print build and target versions",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			fmt.Printf("nanok8s   kubernetes=%s commit=%s built=%s\n",
 				version.KubernetesVersion, version.GitCommit, version.BuildDate)

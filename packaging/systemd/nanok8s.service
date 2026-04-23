@@ -1,0 +1,24 @@
+[Unit]
+Description=nanok8s oneshot boot reconciliation
+Documentation=https://github.com/MatchaScript/nanok8s
+# crio must be ready before we ask kubelet to bring up static pods.
+Wants=crio.service
+After=crio.service network-online.target
+# We start kubelet explicitly from inside this oneshot after writing
+# manifests and then poll /readyz. kubelet.service therefore must not
+# be pulled in by multi-user.target; it only runs because nanok8s asks.
+Before=kubelet.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nanok8s boot
+# Boot-time readyz poll is 3 min (see lifecycle.readyzTimeout); allow a
+# generous margin for slow edge hardware before systemd kills us.
+TimeoutStartSec=10m
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

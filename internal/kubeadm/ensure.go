@@ -21,7 +21,8 @@ import (
 //
 // Each kubeadm phase is internally idempotent: existing, valid files are
 // preserved; missing files are created. Ensure is safe to re-run on every
-// boot and after `nanok8s apply`.
+// boot; lifecycle.Boot calls it via the hidden `boot` subcommand as part
+// of the oneshot nanok8s.service flow.
 func Ensure(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName string) error {
 	kc, err := BuildInitConfiguration(cfg, layout, nodeName)
 	if err != nil {
@@ -39,11 +40,14 @@ func Ensure(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName string) error {
 		return fmt.Errorf("create PKI assets: %w", err)
 	}
 
-	// CreateJoinControlPlaneKubeConfigFiles covers admin/controller-manager/scheduler.
-	// kubelet.conf is produced separately because the join flow delegates that
-	// file to a bootstrap-token exchange which nanok8s does not use.
+	// kubeconfigs: admin.conf / controller-manager.conf / scheduler.conf /
+	// kubelet.conf are the standard kubeadm set. super-admin.conf is the
+	// system:masters-bound client that EnsureAdminClusterRoleBinding falls
+	// back to on a fresh cluster in order to create the kubeadm:cluster-admins
+	// ClusterRoleBinding that admin.conf itself needs.
 	for _, name := range []string{
 		kubeadmconstants.AdminKubeConfigFileName,
+		kubeadmconstants.SuperAdminKubeConfigFileName,
 		kubeadmconstants.ControllerManagerKubeConfigFileName,
 		kubeadmconstants.SchedulerKubeConfigFileName,
 		kubeadmconstants.KubeletKubeConfigFileName,

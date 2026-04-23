@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/MatchaScript/nanok8s/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanok8s/internal/config"
+	"github.com/MatchaScript/nanok8s/internal/version"
 )
 
 func newConfigCmd(g *globalOpts) *cobra.Command {
@@ -22,6 +23,7 @@ func newConfigPrintDefaultsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "print-defaults",
 		Short: "Print a NanoK8sConfig with all defaults applied",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			data, err := config.Marshal(v1alpha1.NewDefault())
 			if err != nil {
@@ -37,13 +39,14 @@ func newConfigValidateCmd(g *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",
 		Short: "Load the config file, apply defaults, and validate it",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(g.configPath)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "config %s is valid (kubernetesVersion=%s, advertiseAddress=%s)\n",
-				g.configPath, cfg.Spec.KubernetesVersion, cfg.Spec.ControlPlane.AdvertiseAddress)
+				g.configPath, version.KubernetesVersion, cfg.Spec.ControlPlane.AdvertiseAddress)
 			return nil
 		},
 	}

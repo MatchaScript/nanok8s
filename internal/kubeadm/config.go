@@ -17,6 +17,7 @@ import (
 
 	v1alpha1 "github.com/MatchaScript/nanok8s/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanok8s/internal/paths"
+	"github.com/MatchaScript/nanok8s/internal/version"
 )
 
 // Layout selects the on-disk directories used by Ensure. Production callers
@@ -50,11 +51,16 @@ func BuildInitConfiguration(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName
 	}
 
 	kc.ClusterName = "kubernetes"
-	kc.KubernetesVersion = cfg.Spec.KubernetesVersion
+	kc.KubernetesVersion = version.KubernetesVersion
 	kc.CertificatesDir = layout.PKIDir
 
 	kc.NodeRegistration.Name = nodeName
 	kc.NodeRegistration.CRISocket = cfg.Spec.Runtime.CRISocket
+	// Taints come from config (SetDefaults fills in the standard control-plane
+	// taint when the user leaves the field unset). An explicit empty slice
+	// from the user means "no taints"; we must preserve that by overriding
+	// kubeadm's own defaulting, which would otherwise inject the CP taint.
+	kc.NodeRegistration.Taints = cfg.Spec.NodeRegistration.Taints
 
 	kc.LocalAPIEndpoint.AdvertiseAddress = cfg.Spec.ControlPlane.AdvertiseAddress
 	kc.LocalAPIEndpoint.BindPort = cfg.Spec.ControlPlane.BindPort

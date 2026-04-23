@@ -99,6 +99,7 @@ func TestEnsureProducesExpectedArtifacts(t *testing.T) {
 		filepath.Join(layout.PKIDir, "etcd", "ca.crt"),
 		filepath.Join(layout.PKIDir, "etcd", "server.crt"),
 		filepath.Join(layout.KubeconfigDir, "admin.conf"),
+		filepath.Join(layout.KubeconfigDir, "super-admin.conf"),
 		filepath.Join(layout.KubeconfigDir, "controller-manager.conf"),
 		filepath.Join(layout.KubeconfigDir, "scheduler.conf"),
 		filepath.Join(layout.KubeconfigDir, "kubelet.conf"),

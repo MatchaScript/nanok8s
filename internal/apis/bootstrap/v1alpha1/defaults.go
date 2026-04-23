@@ -1,6 +1,6 @@
 package v1alpha1
 
-import "github.com/MatchaScript/nanok8s/internal/version"
+import corev1 "k8s.io/api/core/v1"
 
 const (
 	DefaultBindPort         int32 = 6443
@@ -10,7 +10,20 @@ const (
 	DefaultCRISocket              = "unix:///var/run/crio/crio.sock"
 	DefaultCAValidityDays   int32 = 3650
 	DefaultLeafValidityDays int32 = 3650
+
+	// ControlPlaneTaintKey is the kubeadm-standard node taint applied to
+	// control-plane nodes. Kept in sync with
+	// kubeadmconstants.LabelNodeRoleControlPlane.
+	ControlPlaneTaintKey = "node-role.kubernetes.io/control-plane"
 )
+
+// DefaultControlPlaneTaint is the single-taint default used when the user
+// leaves spec.nodeRegistration.taints unset. Matches kubeadm's
+// DefaultedStaticInitConfiguration() output.
+var DefaultControlPlaneTaint = corev1.Taint{
+	Key:    ControlPlaneTaintKey,
+	Effect: corev1.TaintEffectNoSchedule,
+}
 
 // SetDefaults fills zero-valued fields with the project defaults.
 // It mutates the argument in place.
@@ -20,10 +33,6 @@ func SetDefaults(c *NanoK8sConfig) {
 	}
 	if c.Kind == "" {
 		c.Kind = Kind
-	}
-
-	if c.Spec.KubernetesVersion == "" {
-		c.Spec.KubernetesVersion = version.KubernetesVersion
 	}
 
 	cp := &c.Spec.ControlPlane
@@ -57,6 +66,13 @@ func SetDefaults(c *NanoK8sConfig) {
 	}
 	if certs.LeafValidityDays == 0 {
 		certs.LeafValidityDays = DefaultLeafValidityDays
+	}
+
+	// Taints: nil => default, [] => explicit "no taints". SetDefaults only
+	// substitutes when the user did not set the field at all (nil slice).
+	nr := &c.Spec.NodeRegistration
+	if nr.Taints == nil {
+		nr.Taints = []corev1.Taint{DefaultControlPlaneTaint}
 	}
 }
 
