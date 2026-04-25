@@ -59,11 +59,14 @@ install_cni_plugins() {
 
 install_crio() {
     log_step "Installing CRI-O $CRIO_VERSION"
+    # CRI-O packages moved off pkgs.k8s.io in 2025 and now live on the
+    # openSUSE Build Service under the upstream-maintained isv:/cri-o:/ project.
+    local base="https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb"
     mkdir -p /etc/apt/keyrings
-    curl -fsSL "https://pkgs.k8s.io/addons:/cri-o:/stable:/$CRIO_VERSION/deb/Release.key" |
+    curl -fsSL "$base/Release.key" |
         gpg --dearmor --yes -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
     cat >/etc/apt/sources.list.d/cri-o.list <<EOF
-deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/$CRIO_VERSION/deb/ /
+deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] $base/ /
 EOF
     apt-get update -qq
     apt-get install -qq -y --no-install-recommends cri-o
