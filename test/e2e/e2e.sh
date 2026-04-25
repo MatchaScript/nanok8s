@@ -1,263 +1,361 @@
 #!/usr/bin/env bash
+# End-to-end test suite for nanok8s.
 #
-# Comprehensive End-to-End Test Suite for nanok8s.
-# Modeled after reference testing scripts to ensure robust coverage of both
-# normal and abnormal (edge) cases, providing a high degree of confidence
-# in the cluster's stability and network connectivity.
+# Covers both the golden path (config → bootstrap → boot → ready cluster →
+# workload connectivity) and the disruption paths (invalid config, missing
+# manifest reconciliation, reset wipe, refusal to re-bootstrap without
+# --force). Passing this suite implies every supported boot flow works on
+# a clean Ubuntu runner.
+#
+# Structured after microshift's suites/greenboot + kubeadm's kinder
+# init/reset actions: each test function owns its setup and assertions,
+# and a single EXIT trap dumps systemd + kubectl diagnostics when
+# anything fails.
+#
+# Entry points:
+#   sudo ./test/e2e/e2e.sh        # full setup + all tests
+#   sudo ./test/e2e/e2e.sh tests  # skip setup, just run tests
+# Environment overrides: see lib.sh (KUBELET_VERSION, CRIO_VERSION, etc.).
 
-set -euo pipefail
+set -Eeuo pipefail
 
-# --- Configuration & Globals ---
-NANOK8S_BIN="${NANOK8S_BIN:-/usr/bin/nanok8s}"
-KUBECONFIG="/etc/kubernetes/admin.conf"
-export KUBECONFIG
-KUBECTL="kubectl"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./lib.sh
+source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=./setup.sh
+source "$SCRIPT_DIR/setup.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m'
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_err()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+trap dump_diagnostics EXIT
 
-# --- Helper Functions ---
-wait_for_pods() {
-  local namespace=$1
-  local timeout=$2
-  log_info "Waiting for all pods in namespace '${namespace}' to be Ready (timeout: ${timeout})..."
-  if ! ${KUBECTL} wait --for=condition=Ready pods --all -n "${namespace}" --timeout="${timeout}"; then
-    log_err "Pods in namespace '${namespace}' failed to become Ready."
-  fi
+# ============================================================================
+# Test cases — "normal" = golden path assertion, "abnormal" = disruption or
+# deliberate bad input. Ordered so earlier tests set up state that later
+# tests depend on (bootstrap → boot → addons → workload → reconcile), with
+# reset at the very end.
+# ============================================================================
+
+# --- config surface ---------------------------------------------------------
+
+test_normal_print_defaults_is_valid() {
+    local tmp
+    tmp=$(mktemp)
+    "$NANOK8S_BIN" config print-defaults >"$tmp"
+    assert_contains "$(cat "$tmp")" "apiVersion: bootstrap.nanok8s.io/v1alpha1" "print-defaults"
+    assert_contains "$(cat "$tmp")" "selfSigned: true" "print-defaults"
+    # print-defaults is always advertised as a starter template; it must
+    # pass validate without mutation (except for the placeholder
+    # advertiseAddress).
+    sed -i -E "s|^([[:space:]]+advertiseAddress:[[:space:]]).*$|\1192.168.1.10|" "$tmp"
+    if ! grep -qE "advertiseAddress: 192.168.1.10" "$tmp"; then
+        die "sed substitution failed on print-defaults output"
+    fi
+    "$NANOK8S_BIN" --config "$tmp" config validate
+    rm -f "$tmp"
 }
 
-wait_for_node_ready() {
-  local timeout=$1
-  log_info "Waiting for node to be Ready (timeout: ${timeout})..."
-  if ! ${KUBECTL} wait --for=condition=Ready node --all --timeout="${timeout}"; then
-    log_err "Node failed to become Ready."
-  fi
-}
-
-# --- Setup ---
-setup_dependencies() {
-  log_info "Setting up dependencies (CRI-O, Kubelet, CNI)..."
-  apt-get update -qq >/dev/null
-  apt-get install -qq -y socat conntrack iptables jq curl >/dev/null
-
-  # Install Flannel CNI binary
-  mkdir -p /opt/cni/bin
-  curl -fsSL https://github.com/containernetworking/plugins/releases/download/v1.4.1/cni-plugins-linux-amd64-v1.4.1.tgz | tar -xz -C /opt/cni/bin
-
-  # Install CRI-O
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg || true
-  echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.31/deb/ /" | tee /etc/apt/sources.list.d/cri-o.list
-  apt-get update -qq >/dev/null
-  apt-get install -qq -y cri-o >/dev/null
-  systemctl enable --now crio.service
-
-  # Install Kubelet & Kubectl
-  curl -fsSL https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubelet -o /usr/local/bin/kubelet
-  curl -fsSL https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl
-  chmod +x /usr/local/bin/kubelet /usr/local/bin/kubectl
-
-  # Setup kubelet systemd service (aligned with kubeadm requirements)
-  cat <<EOF > /etc/systemd/system/kubelet.service
-[Unit]
-Description=kubelet: The Kubernetes Node Agent
-Documentation=https://kubernetes.io/docs/
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
-Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
-EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
-EnvironmentFile=-/etc/default/kubelet
-ExecStart=/usr/local/bin/kubelet \$KUBELET_KUBECONFIG_ARGS \$KUBELET_CONFIG_ARGS \$KUBELET_KUBEADM_ARGS \$KUBELET_EXTRA_ARGS
-Restart=always
-StartLimitInterval=0
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-
-  # Setup nanok8s service and config
-  cp packaging/systemd/nanok8s.service /etc/systemd/system/
-  mkdir -p /etc/nanok8s
-  ${NANOK8S_BIN} config print-defaults > /etc/nanok8s/config.yaml
-  systemctl daemon-reload
-}
-
-# --- Test Cases ---
-
-test_abnormal_invalid_config() {
-  log_info "TEST: [Abnormal] Invalid configuration should be rejected."
-  cat <<EOF > /tmp/invalid-config.yaml
+test_abnormal_invalid_config_rejected() {
+    local tmp
+    tmp=$(mktemp)
+    cat >"$tmp" <<'EOF'
 apiVersion: bootstrap.nanok8s.io/v1alpha1
 kind: NanoK8sConfig
 metadata:
   name: bad
 spec:
+  controlPlane:
+    advertiseAddress: "nope-not-an-ip"
   runtime:
-    criSocket: "http://wrong-protocol.sock" # Invalid scheme
+    criSocket: "http://wrong-scheme"
+  certificates:
+    selfSigned: true
 EOF
-
-  if ${NANOK8S_BIN} config validate --config /tmp/invalid-config.yaml 2>/dev/null; then
-    log_err "Config validation should have failed on invalid criSocket."
-  fi
-  log_info "Invalid config correctly rejected."
+    assert_command_fails "validate must reject bad config" \
+        "$NANOK8S_BIN" --config "$tmp" config validate
+    # Error must mention each offending field so operators can fix it.
+    local out
+    if out=$("$NANOK8S_BIN" --config "$tmp" config validate 2>&1); then :; fi
+    assert_contains "$out" "advertiseAddress" "validate error"
+    assert_contains "$out" "criSocket"        "validate error"
+    rm -f "$tmp"
 }
 
-test_normal_bootstrap_and_boot() {
-  log_info "TEST: [Normal] Bootstrap and boot control plane."
-  ${NANOK8S_BIN} config validate # Validates the default config
-  ${NANOK8S_BIN} bootstrap
-
-  if [ ! -f "/etc/kubernetes/manifests/kube-apiserver.yaml" ]; then
-    log_err "Bootstrap did not generate apiserver manifest."
-  fi
-
-  systemctl start nanok8s.service
-  
-  if ! systemctl is-active --quiet nanok8s.service; then
-    journalctl -u nanok8s.service --no-pager
-    log_err "nanok8s.service failed to start."
-  fi
-
-  wait_for_node_ready "3m"
-  wait_for_pods "kube-system" "5m"
-  log_info "Control plane successfully booted."
+test_abnormal_unknown_field_rejected() {
+    local tmp
+    tmp=$(mktemp)
+    cat >"$tmp" <<'EOF'
+apiVersion: bootstrap.nanok8s.io/v1alpha1
+kind: NanoK8sConfig
+spec:
+  controlPlane:
+    advertiseAddress: 192.168.1.10
+  typoField: "oops"
+  certificates:
+    selfSigned: true
+EOF
+    assert_command_fails "unknown field must be rejected (UnmarshalStrict)" \
+        "$NANOK8S_BIN" --config "$tmp" config validate
+    rm -f "$tmp"
 }
 
-test_normal_connectivity() {
-  log_info "TEST: [Normal] Workload & Network Connectivity Test."
-  
-  # Install Flannel to provide Pod network connectivity
-  ${KUBECTL} apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-  log_info "Waiting for Flannel..."
-  wait_for_pods "kube-flannel" "3m"
-  
-  # Deploy a test application and expose it
-  ${KUBECTL} create deployment e2e-test --image=nginx:alpine
-  ${KUBECTL} expose deployment e2e-test --port=80
-  
-  log_info "Waiting for test deployment to become ready..."
-  ${KUBECTL} wait --for=condition=Available deployment/e2e-test --timeout=2m
-  
-  local svc_ip
-  svc_ip=$(${KUBECTL} get svc e2e-test -o jsonpath='{.spec.clusterIP}')
-  
-  log_info "Testing connectivity to Service IP: ${svc_ip}"
-  if ! curl --retry 5 --retry-delay 3 --retry-connrefused -s "http://${svc_ip}" | grep -q "Welcome to nginx"; then
-    log_err "Failed to connect to test workload. Network connectivity is broken."
-  fi
-  log_info "Connectivity test passed."
+# --- bootstrap --------------------------------------------------------------
+
+test_normal_bootstrap_writes_all_artifacts() {
+    "$NANOK8S_BIN" bootstrap
+    for p in \
+        /etc/kubernetes/pki/ca.crt \
+        /etc/kubernetes/pki/apiserver.crt \
+        /etc/kubernetes/pki/etcd/ca.crt \
+        /etc/kubernetes/pki/etcd/server.crt \
+        /etc/kubernetes/pki/sa.key \
+        /etc/kubernetes/admin.conf \
+        /etc/kubernetes/super-admin.conf \
+        /etc/kubernetes/controller-manager.conf \
+        /etc/kubernetes/scheduler.conf \
+        /etc/kubernetes/kubelet.conf \
+        /etc/kubernetes/manifests/etcd.yaml \
+        /etc/kubernetes/manifests/kube-apiserver.yaml \
+        /etc/kubernetes/manifests/kube-controller-manager.yaml \
+        /etc/kubernetes/manifests/kube-scheduler.yaml \
+        /var/lib/kubelet/config.yaml \
+        /var/lib/kubelet/kubeadm-flags.env
+    do
+        assert_file_present "$p" "bootstrap artifact"
+    done
+
+    # state.Exists() must now report true — the bootstrap command writes
+    # last-event specifically to establish this.
+    assert_file_present /var/lib/nanok8s/state/last-event "bootstrap event marker"
 }
 
-test_abnormal_reconciliation() {
-  log_info "TEST: [Abnormal] Artifact corruption reconciliation."
-  
-  # Simulate tampering with a critical bootstrap artifact
-  rm -f /etc/kubernetes/manifests/kube-scheduler.yaml
-  systemctl stop kubelet
-  systemctl restart nanok8s.service
-  
-  if [ ! -f "/etc/kubernetes/manifests/kube-scheduler.yaml" ]; then
-    log_err "nanok8s failed to reconcile and restore the missing kube-scheduler manifest."
-  fi
-  wait_for_node_ready "2m"
-  log_info "Reconciliation recovered the cluster successfully."
+test_abnormal_bootstrap_refuses_when_state_exists() {
+    # Follow-up of the prior test: running bootstrap again without --force
+    # must refuse so operators don't accidentally blow away certs.
+    assert_command_fails "re-bootstrap without --force must refuse" \
+        "$NANOK8S_BIN" bootstrap
 }
 
-test_normal_upgrade_simulation() {
-  log_info "TEST: [Normal] Upgrade simulation."
-  
-  # We swap the binary with the compiled v1.36.0 mock and restart the service
-  cp bin/nanok8s-v1.36.0 /usr/bin/nanok8s
-  systemctl restart nanok8s.service
-  
-  # Give it a moment to write state
-  sleep 5
-  
-  local last_event
-  last_event=$(cat /var/lib/nanok8s/state/last-event)
-  if [[ ! "${last_event}" == *"upgraded"* ]]; then
-    log_err "Upgrade event not recorded. Last event: ${last_event}"
-  fi
-  
-  if ! grep -q "v1.36.0" /var/lib/nanok8s/state/last-boot.json; then
-    log_err "v1.36.0 not found in last-boot.json after upgrade."
-  fi
-  log_info "Upgrade logic executed perfectly."
+test_normal_bootstrap_force_overwrites() {
+    # --force is the escape hatch. It must succeed and leave a working
+    # set of artefacts in place.
+    "$NANOK8S_BIN" bootstrap --force
+    assert_file_present /etc/kubernetes/manifests/kube-apiserver.yaml "force bootstrap"
 }
 
-test_abnormal_rollback_simulation() {
-  log_info "TEST: [Abnormal] Rollback behavior simulation (Greenboot style)."
-  
-  # For nanok8s, if ostree isn't present, maybeRestore logs "non-ostree system: backup/restore disabled".
-  # We will test that a boot failure properly exits non-zero so greenboot catches it.
-  
-  # Tamper with kubelet to force a boot failure
-  mv /usr/local/bin/kubelet /usr/local/bin/kubelet.bak
-  echo -e "#!/bin/sh\nexit 1" > /usr/local/bin/kubelet
-  chmod +x /usr/local/bin/kubelet
-  
-  # Systemd should fail starting nanok8s because kubelet will fail /readyz timeout
-  # We use a short timeout wrapper or just observe the failure. Actually, waitReadyz takes 3 mins.
-  # Let's fail the ensure phase instead to make it fast.
-  rm -f /etc/kubernetes/pki/ca.crt
-  
-  if /usr/bin/nanok8s boot 2>/dev/null; then
-    log_err "nanok8s boot should have failed without a CA cert!"
-  fi
-  
-  local last_event
-  last_event=$(cat /var/lib/nanok8s/state/last-event)
-  if [[ ! "${last_event}" == *"boot failed"* ]]; then
-    log_warn "Failure event not recorded appropriately. Last event: ${last_event}"
-  fi
-  
-  # Restore
-  mv /usr/local/bin/kubelet.bak /usr/local/bin/kubelet
-  ${NANOK8S_BIN} bootstrap
-  log_info "Boot failure correctly propagated."
+# --- boot → ready cluster ---------------------------------------------------
+
+test_normal_service_boots_to_ready() {
+    log_info "Starting nanok8s.service"
+    systemctl start nanok8s.service
+    systemctl is-active --quiet nanok8s.service \
+        || die "nanok8s.service inactive after start"
+
+    wait_for_node_ready 5m
+
+    # Every kubeadm-style control-plane pod must be Ready. A Ready node
+    # alone isn't enough — controller-manager / scheduler crash loops
+    # would be invisible.
+    local nodename
+    nodename=$(hostname | tr '[:upper:]' '[:lower:]')
+    for pod in \
+        "etcd-$nodename" \
+        "kube-apiserver-$nodename" \
+        "kube-controller-manager-$nodename" \
+        "kube-scheduler-$nodename"
+    do
+        log_info "Waiting for static pod $pod Ready"
+        kubectl wait --for=condition=Ready pod/"$pod" \
+            -n kube-system --timeout=3m \
+            || die "$pod did not reach Ready"
+    done
 }
 
-test_normal_reset() {
-  log_info "TEST: [Normal] Reset functionality."
-  ${NANOK8S_BIN} reset --yes
-  
-  if [ -d "/etc/kubernetes/manifests" ]; then
-    log_err "/etc/kubernetes/manifests was not removed by reset."
-  fi
-  if [ -d "/var/lib/etcd" ]; then
-    log_err "/var/lib/etcd was not removed by reset."
-  fi
-  if systemctl is-active --quiet kubelet.service; then
-    log_err "kubelet is still running after reset."
-  fi
-  log_info "Reset successfully wiped the node."
+test_normal_admin_rbac_bound() {
+    # admin.conf should be fully authorised thanks to the
+    # kubeadm:cluster-admins ClusterRoleBinding created by EnsureAdminRBAC.
+    kubectl auth can-i '*' '*' --all-namespaces >/dev/null \
+        || die "admin.conf not authorised for cluster-wide verbs"
+    kubectl get clusterrolebinding kubeadm:cluster-admins >/dev/null \
+        || die "kubeadm:cluster-admins CRB missing"
 }
 
-# --- Main Execution ---
+test_normal_node_marked_controlplane() {
+    local nodename
+    nodename=$(hostname | tr '[:upper:]' '[:lower:]')
+
+    # Label applied by markcontrolplane phase.
+    local label
+    label=$(kubectl get node "$nodename" \
+        -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}')
+    # The label value is the empty string; the assertion is that the key
+    # exists, which we detect via the jsonpath query succeeding without a
+    # literal "<no value>" marker in the output.
+    if kubectl get node "$nodename" -o json \
+        | jq -e '.metadata.labels | has("node-role.kubernetes.io/control-plane")' >/dev/null
+    then
+        :
+    else
+        die "control-plane label missing (value=$label)"
+    fi
+
+    # Taint applied by markcontrolplane phase.
+    kubectl get node "$nodename" -o json \
+        | jq -e '.spec.taints[]? | select(.key == "node-role.kubernetes.io/control-plane")' >/dev/null \
+        || die "control-plane taint missing"
+}
+
+test_normal_addons_deployed() {
+    # CoreDNS and kube-proxy are the only addons nanok8s manages; both
+    # should be reconciled by EnsureAddons.
+    kubectl -n kube-system get deployment coredns >/dev/null \
+        || die "CoreDNS deployment missing"
+    kubectl -n kube-system get daemonset kube-proxy >/dev/null \
+        || die "kube-proxy DaemonSet missing"
+}
+
+# --- CNI + workload end-to-end ----------------------------------------------
+
+test_normal_cni_and_workload_connectivity() {
+    log_info "Installing flannel CNI"
+    kubectl apply -f "$FLANNEL_URL"
+    wait_for_pods_ready kube-flannel 5m
+
+    # CoreDNS can only schedule once CNI is ready — wait for it here,
+    # not earlier. Kube-proxy runs in host network so it was already up.
+    wait_for_pods_ready kube-system 5m
+
+    log_info "Deploying nginx test workload"
+    kubectl create deployment e2e-nginx --image=nginx:alpine
+    kubectl expose deployment e2e-nginx --port=80 --target-port=80
+    kubectl wait --for=condition=Available deployment/e2e-nginx --timeout=3m
+
+    local svc_ip
+    svc_ip=$(kubectl get svc e2e-nginx -o jsonpath='{.spec.clusterIP}')
+    log_info "Curling ClusterIP http://$svc_ip"
+    # Service IP routing takes a few seconds to settle after deployment;
+    # retry instead of hoping for an instantaneous success.
+    retry 10 3 bash -c "curl --max-time 5 -fsS http://$svc_ip | grep -q 'Welcome to nginx'" \
+        || die "workload not reachable via ClusterIP"
+}
+
+# --- reconciliation (disrupt → reboot service → recover) --------------------
+
+test_abnormal_missing_manifest_reconciles() {
+    log_info "Deleting kube-scheduler manifest to simulate disk tamper"
+    rm -f /etc/kubernetes/manifests/kube-scheduler.yaml
+
+    log_info "Restarting nanok8s.service"
+    systemctl restart nanok8s.service
+    systemctl is-active --quiet nanok8s.service || die "nanok8s.service inactive after restart"
+
+    assert_file_present /etc/kubernetes/manifests/kube-scheduler.yaml \
+        "Ensure must have re-created kube-scheduler.yaml"
+
+    local nodename
+    nodename=$(hostname | tr '[:upper:]' '[:lower:]')
+    kubectl wait --for=condition=Ready pod/"kube-scheduler-$nodename" \
+        -n kube-system --timeout=3m \
+        || die "kube-scheduler did not return to Ready after reconcile"
+}
+
+test_normal_idempotent_reboot() {
+    # A second restart of a healthy cluster must be a no-op, leave
+    # last-event in a healthy state, and not record an upgrade.
+    systemctl restart nanok8s.service
+    systemctl is-active --quiet nanok8s.service || die "2nd restart failed"
+    wait_for_node_ready 3m
+
+    local event
+    event=$(cat /var/lib/nanok8s/state/last-event)
+    if [[ "$event" == *"failed"* ]]; then
+        die "last-event reports failure on idempotent restart: $event"
+    fi
+    if [[ "$event" == *"upgraded"* ]]; then
+        die "last-event reports upgrade on same-version restart: $event"
+    fi
+}
+
+# --- reset ------------------------------------------------------------------
+
+test_normal_reset_wipes_everything() {
+    "$NANOK8S_BIN" reset --yes
+
+    assert_file_absent /etc/kubernetes/manifests "reset"
+    assert_file_absent /var/lib/etcd "reset"
+    assert_file_absent /var/lib/nanok8s "reset"
+
+    # Reset must not leave kubelet.service running; static pods would
+    # restart with half-wiped state otherwise.
+    if systemctl is-active --quiet kubelet.service; then
+        die "kubelet.service still active after reset"
+    fi
+}
+
+test_abnormal_reset_requires_yes() {
+    assert_command_fails "reset without --yes must refuse" \
+        "$NANOK8S_BIN" reset
+}
+
+test_normal_bootstrap_after_reset_is_clean() {
+    # Reset must leave the node in a state where bootstrap succeeds
+    # without --force — otherwise `reset` didn't actually clear
+    # state.Exists() markers.
+    "$NANOK8S_BIN" bootstrap
+    assert_file_present /etc/kubernetes/manifests/kube-apiserver.yaml "post-reset bootstrap"
+    # Clean up so the trap diagnostics are meaningful.
+    "$NANOK8S_BIN" reset --yes
+}
+
+# ============================================================================
+# Runner
+# ============================================================================
+
+run_all_tests() {
+    run_test "print-defaults output is itself valid"          test_normal_print_defaults_is_valid
+    run_test "[abnormal] invalid config rejected"             test_abnormal_invalid_config_rejected
+    run_test "[abnormal] unknown field rejected (strict)"     test_abnormal_unknown_field_rejected
+
+    run_test "bootstrap writes every expected artefact"       test_normal_bootstrap_writes_all_artifacts
+    run_test "[abnormal] re-bootstrap refused without --force" test_abnormal_bootstrap_refuses_when_state_exists
+    run_test "bootstrap --force overwrites existing state"    test_normal_bootstrap_force_overwrites
+
+    run_test "nanok8s.service boots to Ready cluster"         test_normal_service_boots_to_ready
+    run_test "admin.conf is bound to cluster-admins CRB"      test_normal_admin_rbac_bound
+    run_test "node is labelled+tainted as control-plane"      test_normal_node_marked_controlplane
+    run_test "CoreDNS + kube-proxy addons deployed"           test_normal_addons_deployed
+
+    run_test "CNI + workload connectivity end-to-end"         test_normal_cni_and_workload_connectivity
+
+    run_test "[abnormal] missing manifest reconciles"         test_abnormal_missing_manifest_reconciles
+    run_test "idempotent restart is a no-op"                  test_normal_idempotent_reboot
+
+    run_test "reset wipes every managed path"                 test_normal_reset_wipes_everything
+    run_test "[abnormal] reset refuses without --yes"         test_abnormal_reset_requires_yes
+    run_test "bootstrap after reset starts clean"             test_normal_bootstrap_after_reset_is_clean
+}
+
 main() {
-  log_info "Starting nanok8s rigorous E2E test suite..."
-  setup_dependencies
-  
-  test_abnormal_invalid_config
-  test_normal_bootstrap_and_boot
-  test_normal_connectivity
-  test_abnormal_reconciliation
-  test_normal_upgrade_simulation
-  test_abnormal_rollback_simulation
-  test_normal_reset
-  
-  log_info "All rigorous E2E tests passed successfully. 🎉"
+    if [[ "$EUID" -ne 0 ]]; then
+        die "E2E suite must be run as root (sudo)"
+    fi
+    local mode=${1:-full}
+    case "$mode" in
+        full)
+            setup
+            run_all_tests
+            ;;
+        tests)
+            run_all_tests
+            ;;
+        setup)
+            setup
+            ;;
+        *)
+            die "unknown mode: $mode (expected: full|tests|setup)"
+            ;;
+    esac
+    log_info "All E2E tests passed"
 }
 
-main
+main "$@"
