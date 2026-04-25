@@ -227,6 +227,7 @@ test_normal_cni_and_workload_connectivity() {
 
     log_info "Deploying nginx test workload"
     kubectl create deployment e2e-nginx --image=nginx:alpine
+    kubectl patch deployment e2e-nginx -p '{"spec": {"template": {"spec": {"tolerations": [{"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"}]}}}}'
     kubectl expose deployment e2e-nginx --port=80 --target-port=80
     kubectl wait --for=condition=Available deployment/e2e-nginx --timeout=3m
 
