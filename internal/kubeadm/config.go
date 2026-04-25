@@ -69,11 +69,9 @@ func BuildInitConfiguration(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName
 	kc.Networking.PodSubnet = cfg.Spec.ControlPlane.PodSubnet
 	kc.Networking.DNSDomain = "cluster.local"
 
-	kc.Etcd = kubeadmapi.Etcd{
-		Local: &kubeadmapi.LocalEtcd{
-			ServerCertSANs: extraSANs(cfg),
-			PeerCertSANs:   extraSANs(cfg),
-		},
+	if kc.Etcd.Local != nil {
+		kc.Etcd.Local.ServerCertSANs = extraSANs(cfg)
+		kc.Etcd.Local.PeerCertSANs = extraSANs(cfg)
 	}
 
 	kc.APIServer.CertSANs = extraSANs(cfg)
