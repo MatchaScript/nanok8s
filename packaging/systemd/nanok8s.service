@@ -1,21 +1,29 @@
 [Unit]
-Description=nanok8s oneshot boot reconciliation
+Description=nanok8s boot reconciliation
 Documentation=https://github.com/MatchaScript/nanok8s
 # crio must be ready before we ask kubelet to bring up static pods.
 Wants=crio.service
 After=crio.service network-online.target
-# We start kubelet explicitly from inside this oneshot after writing
-# manifests and then poll /readyz. kubelet.service therefore must not
-# be pulled in by multi-user.target; it only runs because nanok8s asks.
+# kubelet.service is ordered After= us so multi-user.target cannot race
+# kubelet ahead of our manifest write. Safe because nanok8s sends
+# sd_notify READY=1 right after writing manifests (see
+# internal/lifecycle/boot.go); systemd then considers us Active and
+# unblocks any kubelet start job that was queued behind our activation.
 Before=kubelet.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=notify
+NotifyAccess=main
 ExecStart=/usr/bin/nanok8s boot
 # Boot-time readyz poll is 3 min (see lifecycle.readyzTimeout); allow a
-# generous margin for slow edge hardware before systemd kills us.
+# generous margin for slow edge hardware before systemd kills us. Once
+# we send READY=1 systemd switches to its idle watchdog and this
+# timeout no longer applies.
 TimeoutStartSec=10m
+# Healthy boot leaves nanok8s parked on SIGTERM so the unit stays
+# Active(running) and keeps holding kubelet's ordering dep. Restart on
+# unexpected exit would mask greenboot failure detection, so leave it
+# off — non-zero exits propagate to greenboot's required.d/.
 Restart=no
 StandardOutput=journal
 StandardError=journal

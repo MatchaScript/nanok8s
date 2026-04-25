@@ -1,5 +1,5 @@
-// Package lifecycle is the oneshot orchestrator that nanok8s.service
-// runs every boot. Aligned with microshift's prerun flow
+// Package lifecycle is the boot-time orchestrator that nanok8s.service
+// runs. Aligned with microshift's prerun flow
 // (reference/microshift/pkg/admin/prerun/prerun.go):
 //
 //  1. If the greenboot red.d hook left a restore marker, pick the
@@ -10,10 +10,18 @@
 //     last successful boot wrote) so that a future rollback into that
 //     deployment has a backup to pick up. The backup is named after the
 //     previous boot's deployment+boot ids recorded in last-boot.json.
-//  3. Reconcile via kubeadm phases (Ensure), start kubelet, poll
-//     /readyz, reconcile addons (best effort).
+//  3. Reconcile via kubeadm phases (Ensure), notify systemd READY=1
+//     (so kubelet.service ordered After= us can proceed), start kubelet,
+//     poll /readyz, reconcile addons (best effort).
 //  4. Prune backups belonging to deployments that bootc has GCed.
-//  5. Update last-boot.json and last-event. Exit 0.
+//  5. Update last-boot.json and last-event. Caller idles until SIGTERM.
+//
+// nanok8s.service is Type=notify and stays Active(running) once Boot
+// returns nil — the binary blocks in the caller after a healthy boot
+// rather than exiting. This lets us keep Before=kubelet.service in the
+// unit (so multi-user.target cannot race kubelet ahead of us) while
+// avoiding the self-deadlock that would otherwise occur if the service
+// were still "activating" when we asked systemd to start kubelet.
 //
 // On any failure between Ensure and /readyz we log last-event and
 // return the error; nanok8s.service exits non-zero and greenboot's
@@ -33,6 +41,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/daemon"
 	"k8s.io/client-go/kubernetes"
 
 	v1alpha1 "github.com/MatchaScript/nanok8s/internal/apis/bootstrap/v1alpha1"
@@ -108,6 +117,13 @@ func Boot(ctx context.Context, cfg *v1alpha1.NanoK8sConfig, nodeName, selfVersio
 	if err := kubeadm.Ensure(cfg, kubeadm.DefaultLayout(), nodeName); err != nil {
 		return bootFailed(upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
 	}
+
+	// Manifests and kubeconfigs are now on disk. Tell systemd we are
+	// READY before asking it to start kubelet.service: nanok8s.service
+	// has Before=kubelet.service, so as long as we are still in
+	// 'activating' state systemd will queue the kubelet start job behind
+	// our own activation and the readyz wait below would deadlock.
+	notifyReady(logf)
 
 	if err := startKubelet(ctx, logf); err != nil {
 		return bootFailed(upgrading, prev.Version, selfVersion, err)
@@ -226,6 +242,22 @@ func bootFailed(upgrading bool, prev, self string, cause error) error {
 		_ = state.WriteLastEvent(fmt.Sprintf("boot failed at %s: %s", self, reason))
 	}
 	return cause
+}
+
+// notifyReady sends sd_notify READY=1 if running under a systemd unit
+// with Type=notify. Outside systemd (e.g. unit tests, manual `nanok8s
+// boot` invocation) it is a no-op. We pass unsetEnvironment=true so
+// that the systemctl/kubeadm processes we exec afterwards do not
+// inherit NOTIFY_SOCKET and accidentally re-send readiness on our
+// behalf.
+func notifyReady(logf func(string, ...any)) {
+	sent, err := daemon.SdNotify(true, daemon.SdNotifyReady)
+	switch {
+	case err != nil:
+		logf("sd_notify READY=1 failed (continuing): %v", err)
+	case sent:
+		logf("sd_notify READY=1 sent")
+	}
 }
 
 // startKubelet asks systemd to start kubelet.service without blocking
