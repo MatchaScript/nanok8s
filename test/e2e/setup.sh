@@ -86,6 +86,10 @@ install_kubelet_kubectl() {
 
     # kubelet unit matching the flags/env nanok8s's kubeadm phases expect.
     # Aligned with https://github.com/kubernetes/release/blob/master/cmd/krel/templates/latest/kubelet/kubelet.service
+    # No [Install] section: kubelet must only ever be started by
+    # nanok8s.service. Letting multi-user.target pull it in would race
+    # ahead of nanok8s's manifest write (nanok8s.service deliberately
+    # has no Before=kubelet.service — see packaging/systemd/nanok8s.service).
     cat >"$KUBELET_SERVICE_UNIT" <<'EOF'
 [Unit]
 Description=kubelet: The Kubernetes Node Agent
@@ -102,9 +106,6 @@ ExecStart=/usr/local/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $
 Restart=always
 StartLimitInterval=0
 RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
 EOF
 }
 

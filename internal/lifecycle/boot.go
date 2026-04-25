@@ -10,18 +10,21 @@
 //     last successful boot wrote) so that a future rollback into that
 //     deployment has a backup to pick up. The backup is named after the
 //     previous boot's deployment+boot ids recorded in last-boot.json.
-//  3. Reconcile via kubeadm phases (Ensure), notify systemd READY=1
-//     (so kubelet.service ordered After= us can proceed), start kubelet,
-//     poll /readyz, reconcile addons (best effort).
+//  3. Reconcile via kubeadm phases (Ensure), start kubelet, poll
+//     /readyz, reconcile addons (best effort), then notify systemd
+//     READY=1 so a blocking `systemctl start` only returns once the
+//     cluster is actually usable.
 //  4. Prune backups belonging to deployments that bootc has GCed.
 //  5. Update last-boot.json and last-event. Caller idles until SIGTERM.
 //
 // nanok8s.service is Type=notify and stays Active(running) once Boot
 // returns nil — the binary blocks in the caller after a healthy boot
-// rather than exiting. This lets us keep Before=kubelet.service in the
-// unit (so multi-user.target cannot race kubelet ahead of us) while
-// avoiding the self-deadlock that would otherwise occur if the service
-// were still "activating" when we asked systemd to start kubelet.
+// rather than exiting. The unit deliberately does NOT declare
+// Before=kubelet.service: while we're still 'activating' systemd would
+// queue our own inline `systemctl start kubelet.service` job behind
+// that activation and deadlock. Instead the kubelet unit we ship
+// carries no [Install] section, so multi-user.target cannot pull it
+// in ahead of nanok8s — kubelet only ever runs because nanok8s asked.
 //
 // On any failure between Ensure and /readyz we log last-event and
 // return the error; nanok8s.service exits non-zero and greenboot's
@@ -118,13 +121,6 @@ func Boot(ctx context.Context, cfg *v1alpha1.NanoK8sConfig, nodeName, selfVersio
 		return bootFailed(upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
 	}
 
-	// Manifests and kubeconfigs are now on disk. Tell systemd we are
-	// READY before asking it to start kubelet.service: nanok8s.service
-	// has Before=kubelet.service, so as long as we are still in
-	// 'activating' state systemd will queue the kubelet start job behind
-	// our own activation and the readyz wait below would deadlock.
-	notifyReady(logf)
-
 	if err := startKubelet(ctx, logf); err != nil {
 		return bootFailed(upgrading, prev.Version, selfVersion, err)
 	}
@@ -180,6 +176,16 @@ func Boot(ctx context.Context, cfg *v1alpha1.NanoK8sConfig, nodeName, selfVersio
 	default:
 		_ = state.WriteLastEvent(fmt.Sprintf("healthy at %s", selfVersion))
 	}
+	// Cluster is verified healthy. Notify systemd READY=1 so a blocking
+	// `systemctl start nanok8s.service` returns only once the system is
+	// actually usable. The unit deliberately does NOT carry
+	// Before=kubelet.service: that would make systemd queue the kubelet
+	// start job we issue from inside startKubelet behind our own
+	// activation, deadlocking the readyz wait. Instead we keep kubelet
+	// from racing ahead by ensuring kubelet.service ships without an
+	// [Install] section, so multi-user.target cannot pull it in
+	// independently of nanok8s.
+	notifyReady(logf)
 	logf("boot complete")
 	return nil
 }
