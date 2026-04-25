@@ -39,8 +39,8 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print build and target versions",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Printf("nanok8s   kubernetes=%s commit=%s built=%s\n",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(), "nanok8s   kubernetes=%s commit=%s built=%s\n",
 				version.KubernetesVersion, version.GitCommit, version.BuildDate)
 			return nil
 		},

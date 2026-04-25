@@ -19,8 +19,9 @@ import (
 )
 
 // OSTreeBootedMarker is the kernel-provided file that ostree / rpm-ostree
-// touches when the system booted an ostree deployment.
-const OSTreeBootedMarker = "/run/ostree-booted"
+// touches when the system booted an ostree deployment. Declared as a var
+// so tests can point it at a controlled location.
+var OSTreeBootedMarker = "/run/ostree-booted"
 
 // IsOSTree reports whether we are running on an ostree / bootc deployment.
 // When false, callers should skip backup/restore and other deployment-id

@@ -24,7 +24,7 @@ type ObjectMeta struct {
 
 type NanoK8sConfig struct {
 	TypeMeta `json:",inline"`
-	Metadata ObjectMeta       `json:"metadata,omitempty"`
+	Metadata ObjectMeta        `json:"metadata,omitempty"`
 	Spec     NanoK8sConfigSpec `json:"spec"`
 }
 

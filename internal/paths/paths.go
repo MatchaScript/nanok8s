@@ -1,9 +1,13 @@
 // Package paths centralises every filesystem location nanok8s reads or writes.
 // Having one source of truth here makes it straightforward to relocate trees
 // for tests (override these vars before calling into other packages).
+//
+// Declared as `var` rather than `const` specifically so tests can repoint
+// them at t.TempDir() via a helper (see the internal/paths test helper).
+// Production code must not mutate them.
 package paths
 
-const (
+var (
 	// ConfigDir holds user-facing nanok8s configuration.
 	ConfigDir  = "/etc/nanok8s"
 	ConfigFile = ConfigDir + "/config.yaml"
