@@ -126,20 +126,33 @@ install_nanok8s_service() {
     install -m 0644 "$REPO_ROOT/packaging/systemd/nanok8s.service" "$NANOK8S_SERVICE_UNIT"
     mkdir -p /etc/nanok8s
     # Seed config.yaml from `nanok8s config print-defaults` and override
-    # advertiseAddress with the primary non-loopback IP so the apiserver
-    # actually accepts the SAN.
+    # the fields that need to differ for single-node e2e:
+    #   - advertiseAddress: real primary IP, so the apiserver SAN matches.
+    #   - nodeRegistration.taints: empty list, so the lone control-plane
+    #     node is schedulable for the workload connectivity test (no
+    #     worker exists). Empty != nil — see v1alpha1.SetDefaults.
     local primary_ip
     primary_ip=$(hostname -I | awk '{print $1}')
     "$NANOK8S_BIN" config print-defaults \
         | sed -E "s|^([[:space:]]+advertiseAddress:[[:space:]]).*$|\1$primary_ip|" \
+        | awk '
+            /^    taints:$/  { print "    taints: []"; in_taints=1; next }
+            in_taints && /^    -/  { next }
+            in_taints && /^      / { next }
+            { in_taints=0; print }
+          ' \
         >"$NANOK8S_CONFIG"
-    # Verify the rewrite landed: leaving advertiseAddress=0.0.0.0 would
-    # later fail kubelet bootstrapping with a SAN mismatch.
-    if ! grep -qE "advertiseAddress: $primary_ip" "$NANOK8S_CONFIG"; then
+    # Verify both rewrites landed. Failing either silently would yield
+    # confusing downstream errors (apiserver SAN mismatch, or workload
+    # Pending forever on an untolerated taint).
+    if ! grep -qE "^    advertiseAddress: $primary_ip$" "$NANOK8S_CONFIG"; then
         die "failed to rewrite advertiseAddress in $NANOK8S_CONFIG"
     fi
+    if ! grep -qE "^    taints: \[\]$" "$NANOK8S_CONFIG"; then
+        die "failed to flatten nodeRegistration.taints to [] in $NANOK8S_CONFIG"
+    fi
     systemctl daemon-reload
-    log_info "nanok8s config written (advertiseAddress=$primary_ip)"
+    log_info "nanok8s config written (advertiseAddress=$primary_ip, taints=[])"
 }
 
 # ensure_clean_start removes any artefacts from a prior failed run so the

@@ -199,10 +199,15 @@ test_normal_node_marked_controlplane() {
         die "control-plane label missing (value=$label)"
     fi
 
-    # Taint applied by markcontrolplane phase.
-    kubectl get node "$nodename" -o json \
-        | jq -e '.spec.taints[]? | select(.key == "node-role.kubernetes.io/control-plane")' >/dev/null \
-        || die "control-plane taint missing"
+    # The e2e config sets nodeRegistration.taints: [] (see setup.sh) so
+    # the lone node is schedulable. Verify the empty-list semantics flow
+    # all the way through to MarkControlPlane: the default control-plane
+    # taint must NOT be present.
+    if kubectl get node "$nodename" -o json \
+        | jq -e '.spec.taints[]? | select(.key == "node-role.kubernetes.io/control-plane")' >/dev/null
+    then
+        die "control-plane taint present despite nodeRegistration.taints=[] in config"
+    fi
 }
 
 test_normal_addons_deployed() {
@@ -322,7 +327,7 @@ run_all_tests() {
 
     run_test "nanok8s.service boots to Ready cluster"         test_normal_service_boots_to_ready
     run_test "admin.conf is bound to cluster-admins CRB"      test_normal_admin_rbac_bound
-    run_test "node is labelled+tainted as control-plane"      test_normal_node_marked_controlplane
+    run_test "node is labelled control-plane, taints=[] honoured" test_normal_node_marked_controlplane
     run_test "CoreDNS + kube-proxy addons deployed"           test_normal_addons_deployed
 
     run_test "CNI + workload connectivity end-to-end"         test_normal_cni_and_workload_connectivity
