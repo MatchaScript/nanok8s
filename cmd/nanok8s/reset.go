@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,11 +24,14 @@ import (
 //
 //  1. Stop kubelet (so static pods are not restarted mid-cleanup).
 //  2. Stop and remove every container known to CRI-O via `crictl`.
-//  3. Remove the managed filesystem paths (/etc/kubernetes, /var/lib/etcd,
+//  3. Lazy-unmount everything kubelet bind/tmpfs-mounted under
+//     /var/lib/kubelet (projected service-account tokens, csi mounts, …).
+//     Without this step os.RemoveAll trips EBUSY on the projected volumes.
+//  4. Remove the managed filesystem paths (/etc/kubernetes, /var/lib/etcd,
 //     /var/lib/kubelet, /var/lib/nanok8s).
-//  4. Delete CNI virtual interfaces (cni0, flannel.1, kube-ipvs0, …) so
+//  5. Delete CNI virtual interfaces (cni0, flannel.1, kube-ipvs0, …) so
 //     the next cluster's CNI starts from a clean slate.
-//  5. Flush iptables (filter / nat / mangle chains + user-defined chains)
+//  6. Flush iptables (filter / nat / mangle chains + user-defined chains)
 //     and ipvs rules.
 //
 // `--yes` is required; this operation is destructive and irreversible.
@@ -56,6 +61,7 @@ func runReset(ctx context.Context, out io.Writer) error {
 
 	stopKubelet(ctx, logf)
 	cleanupCRIContainers(ctx, logf)
+	unmountKubeletMounts(logf)
 
 	for _, t := range []string{
 		paths.KubernetesDir,
@@ -149,6 +155,48 @@ func crictlRun(ctx context.Context, args ...string) error {
 		return fmt.Errorf("crictl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// unmountKubeletMounts lazy-detaches every mountpoint kubelet placed
+// under /var/lib/kubelet — projected service-account tokens are tmpfs
+// bind-mounts that survive `systemctl stop kubelet`, so a plain
+// os.RemoveAll trips EBUSY on them. Mirrors kubeadm's
+// cmd/kubeadm/app/cmd/phases/reset/unmount_linux.go.
+//
+// Children are unmounted before parents (reverse-sorted by path) so
+// nested binds can detach cleanly. Failures are logged but never fatal:
+// MNT_DETACH already releases the namespace ref so the subsequent
+// RemoveAll succeeds even when the kernel keeps the mount alive briefly.
+func unmountKubeletMounts(logf func(string, ...any)) {
+	raw, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		logf("read /proc/mounts (continuing): %v", err)
+		return
+	}
+	prefix := paths.KubeletDir
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	var targets []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Split(line, " ")
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], prefix) {
+			continue
+		}
+		targets = append(targets, fields[1])
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(targets)))
+	unmounted := 0
+	for _, t := range targets {
+		if err := syscall.Unmount(t, syscall.MNT_DETACH); err != nil {
+			logf("unmount %s (continuing): %v", t, err)
+			continue
+		}
+		unmounted++
+	}
+	if unmounted > 0 {
+		logf("unmounted %d kubelet mounts under %s", unmounted, paths.KubeletDir)
+	}
 }
 
 // cniInterfaces enumerates the virtual network interfaces that CNI
