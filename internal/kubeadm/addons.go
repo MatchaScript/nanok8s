@@ -26,14 +26,10 @@ func EnsureAddons(cfg *v1alpha1.NanoK8sConfig, layout Layout, client kubernetes.
 		return err
 	}
 
-	const (
-		patchesDir    = ""
-		printManifest = false
-	)
-	if err := dns.EnsureDNSAddon(&kc.ClusterConfiguration, client, patchesDir, out, printManifest); err != nil {
+	if err := dns.EnsureDNSAddon(&kc.ClusterConfiguration, client, "", out, false); err != nil {
 		return fmt.Errorf("ensure CoreDNS: %w", err)
 	}
-	if err := proxy.EnsureProxyAddon(&kc.ClusterConfiguration, &kc.LocalAPIEndpoint, client, out, printManifest); err != nil {
+	if err := proxy.EnsureProxyAddon(&kc.ClusterConfiguration, &kc.LocalAPIEndpoint, client, out, false); err != nil {
 		return fmt.Errorf("ensure kube-proxy: %w", err)
 	}
 	return nil
