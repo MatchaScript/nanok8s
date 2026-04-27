@@ -135,6 +135,32 @@ func TestReadLastEvent_EmptyWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestWriteAtomic_Permissions(t *testing.T) {
+	testutil.UseTempPaths(t)
+
+	if err := WriteLastBoot(LastBoot{Version: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(paths.LastBootFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("LastBootFile permissions = %v (%04o); want %v (%04o)", info.Mode().Perm(), info.Mode().Perm(), os.FileMode(0o600), 0o600)
+	}
+
+	if err := WriteLastEvent("event"); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(paths.LastEventFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("LastEventFile permissions = %v (%04o); want %v (%04o)", info.Mode().Perm(), info.Mode().Perm(), os.FileMode(0o600), 0o600)
+	}
+}
+
 // Exists() returns true if any of three markers is present. Cover each
 // marker individually so a future refactor dropping one of them fails
 // the corresponding subtest.
