@@ -57,18 +57,14 @@ func Ensure(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName string) error {
 		}
 	}
 
-	// patchesDir is unused in v0 (no user-supplied kustomize-style patches).
-	const patchesDir = ""
-	const isDryRun = false
-
 	if err := etcd.CreateLocalEtcdStaticPodManifestFile(
-		layout.ManifestsDir, patchesDir, nodeName, &kc.ClusterConfiguration, &kc.LocalAPIEndpoint, isDryRun,
+		layout.ManifestsDir, "", nodeName, &kc.ClusterConfiguration, &kc.LocalAPIEndpoint, false,
 	); err != nil {
 		return fmt.Errorf("create etcd manifest: %w", err)
 	}
 
 	if err := controlplane.CreateInitStaticPodManifestFiles(
-		layout.ManifestsDir, patchesDir, kc, isDryRun,
+		layout.ManifestsDir, "", kc, false,
 	); err != nil {
 		return fmt.Errorf("create control plane manifests: %w", err)
 	}
@@ -86,7 +82,7 @@ func Ensure(cfg *v1alpha1.NanoK8sConfig, layout Layout, nodeName string) error {
 	if err := kubelet.WriteInstanceConfigToDisk(instance, layout.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet instance config: %w", err)
 	}
-	if err := kubelet.WriteConfigToDisk(&kc.ClusterConfiguration, layout.KubeletDir, patchesDir, os.Stderr); err != nil {
+	if err := kubelet.WriteConfigToDisk(&kc.ClusterConfiguration, layout.KubeletDir, "", os.Stderr); err != nil {
 		return fmt.Errorf("write kubelet config: %w", err)
 	}
 
